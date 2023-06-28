@@ -1,0 +1,69 @@
+name: build-and-deploy
+
+on:
+  push:
+    branches:
+      - master
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Install required PowerShell modules
+        run: |
+          $FeedName = 'PSGallery'
+          Install-PackageProvider Nuget -Scope CurrentUser -Force
+          Install-module PSScriptAnalyzer -force -Scope CurrentUser -Repository $FeedName
+          Install-module PSPesterTest -force -Scope CurrentUser -Repository $FeedName
+
+      - name: Pester Test Runner - Mgmt Network Template
+        run: |
+          .\tests\ARMTemplate\Test.ARMTemplate.ps1 -TemplatePath .\templates\Win.Server.No.VMExtensions\azuredeploy.json -parameters ${{ toJson(parameters) }} -variables ${{ toJson(variables) }} -resources ${{ toJson(resources) }}
+        working-directory: ${{ github.workspace }}
+        shell: pwsh
+
+      - name: Publish Test Results
+        uses: EnricoMi/publish-unit-test-result-action@v1
+        with:
+          files: '**/TEST-*.xml'
+          format: NUnit
+
+      - name: Template Validation - Win Server No VM Extensions
+        uses: Azure/cli@v1
+        with:
+          azcliversion: 2.0.72
+          inlineScript: |
+            az login --service-principal -u ${{ secrets.AZURE_CLIENT_ID }} -p ${{ secrets.AZURE_CLIENT_SECRET }} --tenant ${{ secrets.AZURE_TENANT_ID }}
+            az account set --subscription ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+            az deployment group validate --resource-group ${{ env.resourceGroup }} --template-file templates/Win.Server.No.VMExtensions/azuredeploy.json --parameters @templates/Win.Server.No.VMExtensions/parameters/lab.azuredeploy.parameters.json -o json
+
+  deploy:
+    needs: build
+    runs-on: windows-latest
+    steps:
+      - name: Copy Files to: ${{ github.workspace }}/drop
+        run: |
+          mkdir ${{ github.workspace }}/drop
+          cp -r * ${{ github.workspace }}/drop
+        working-directory: ${{ github.workspace }}
+
+      - name: Deploy to Lab environment
+        uses: Azure/cli@v1
+        with:
+          azcliversion: 2.0.72
+          inlineScript: |
+            az login --service-principal -u ${{ secrets.AZURE_CLIENT_ID }} -p ${{ secrets.AZURE_CLIENT_SECRET }} --tenant ${{ secrets.AZURE_TENANT_ID }}
+            az account set --subscription ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+            az deployment group create --resource-group ${{ env.resourceGroup }} --template-file drop/templates/Win.Server.No.VMExtensions/azuredeploy.json --parameters @drop/templates/Win.Server.No.VMExtensions/parameters/lab.azuredeploy.parameters.json -o json
+
+      - name: Deploy to Production environment
+        uses: Azure/cli@v1
+        with:
+          azcliversion: 2.0.72
+          inlineScript: |
+            az login --service-principal -u ${{ secrets.AZURE_CLIENT_ID }} -p ${{ secrets.AZURE_CLIENT_SECRET }} --tenant ${{ secrets.AZURE_TENANT_ID }}
+            az account set --subscription ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+            az deployment group create --resource-group ${{ env.resourceGroup }} --template-file drop/templates/Win.Server.No.VMExtensions/azuredeploy.json --parameters @drop/templates/Win.Server.No.VMExtensions/parameters/prd.azuredeploy.parameters.json -o json
