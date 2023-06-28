@@ -1,0 +1,118 @@
+name: $(BuildDefinitionName)_$(SourceBranchName)_$(Date:yyyyMMdd)$(Rev:.r)
+trigger:
+  branches:
+    include:
+    - master
+  paths:
+    exclude:
+    - README.md
+  
+stages:
+- stage: build
+  jobs:
+  - job: Pester_Tests
+    variables:
+      - group: Tests - Single-Win-VM-On.VMExtensions
+    displayName: Pester Tests
+    pool:
+      name: Hosted Windows 2019 with VS2019
+      demands: azureps
+    steps:
+    - powershell: |
+        $FeedName = 'PSGallery'
+        Install-PackageProvider Nuget -Scope CurrentUser -Force
+        Install-module PSScriptAnalyzer -force -Scope CurrentUser -Repository $FeedName
+        Install-module PSPesterTest -force -Scope CurrentUser -Repository $FeedName
+      displayName: 'Install required PowerShell modules'
+
+    - task: richardfennellBM.BM-VSTS-PesterRunner-Task.Pester-Task.Pester@8
+      displayName: 'Pester Test Runner - Mgmt Network Template'
+      inputs:
+        scriptFolder: '@{Path=''$(System.DefaultWorkingDirectory)\tests\ARMTemplate\Test.ARMTemplate.ps1''; Parameters=@{TemplatePath =''$(System.DefaultWorkingDirectory)\templates\Win.Server.No.VMExtensions\azuredeploy.json''; parameters =$(parameters); variables = $(variables); resources = $(resources)}}'
+        resultsFile: '$(System.DefaultWorkingDirectory)\TEST-SingleWinServerNoExtension.xml'
+
+    - task: PublishTestResults@2
+      displayName: 'Publish Test Results **/TEST-*.xml'
+      inputs:
+        testResultsFormat: NUnit
+
+  - job: ARM_Deployment_Validation
+    variables:
+    - group: Variables - Single-Win-VM (lab)
+    displayName: ARM Deployment Validation
+    dependsOn: Pester_Tests
+    steps:
+    - task: AzureResourceGroupDeployment@2
+      displayName: 'Template Validation - Win Server No VM Extensions'
+      inputs:
+        azureSubscription: 'sub-lab'
+        resourceGroupName: '$(resourceGroup)'
+        location: '$(location)'
+        csmFile: templates/Win.Server.No.VMExtensions/azuredeploy.json
+        csmParametersFile: templates/Win.Server.No.VMExtensions/parameters/lab.azuredeploy.parameters.json
+        overrideParameters: '-adminUsername $(adminUsername) -adminPassword $(adminPassword)'
+        deploymentMode: Validation
+
+  - job: Publish_Pattern
+    displayName: Publish Pattern
+    dependsOn: 
+    - Pester_Tests
+    - ARM_Deployment_Validation
+    steps:
+    - task: CopyFiles@2
+      displayName: 'Copy Files to: $(Build.ArtifactStagingDirectory)'
+      inputs:
+        SourceFolder: '$(Build.SourcesDirectory)'
+        TargetFolder: '$(Build.ArtifactStagingDirectory)'
+        CleanTargetFolder: true
+        OverWrite: true
+
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish Artifact: drop'
+
+- stage: lab_deploy
+  jobs:
+    - deployment: lab_deploy
+      variables:
+      - group: Variables - Single-Win-VM (lab)
+      displayName: 'Deploy to Lab environment'
+      pool:
+        name: Hosted Windows 2019 with VS2019
+        demands: azureps
+      environment: 'lab'
+      strategy:
+        runOnce:
+          deploy:
+            steps:
+            - task: AzureResourceGroupDeployment@2
+              displayName: 'Deploy Update Schedules ARM Template'
+              inputs:
+                azureSubscription: 'sub-lab'
+                resourceGroupName: '$(resourceGroup)'
+                location: '$(location)'
+                csmFile: '$(Agent.BuildDirectory)/drop/templates/Win.Server.No.VMExtensions/azuredeploy.json'
+                csmParametersFile: '$(Agent.BuildDirectory)/drop/templates/Win.Server.No.VMExtensions/parameters/lab.azuredeploy.parameters.json'
+                overrideParameters: '-adminUsername $(adminUser) -adminPassword $(adminPassword)'
+- stage: prod_deploy
+  jobs:
+    - deployment: prod_deploy
+      variables:
+      - group: Variables - Single-Win-VM (prod)
+      displayName: 'Deploy to Production environment'
+      pool:
+        name: Hosted Windows 2019 with VS2019
+        demands: azureps
+      environment: 'prod'
+      strategy:
+        runOnce:
+          deploy:
+            steps:
+            - task: AzureResourceGroupDeployment@2
+              displayName: 'Deploy Update Schedules ARM Template'
+              inputs:
+                azureSubscription: 'sub-prod'
+                resourceGroupName: '$(resourceGroup)'
+                location: '$(location)'
+                csmFile: '$(Agent.BuildDirectory)/drop/templates/Win.Server.No.VMExtensions/azuredeploy.json'
+                csmParametersFile: '$(Agent.BuildDirectory)/drop/templates/Win.Server.No.VMExtensions/parameters/prd.azuredeploy.parameters.json'
+                overrideParameters: '-adminUsername $(adminUser) -adminPassword $(adminPassword)'
